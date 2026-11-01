@@ -1,0 +1,2 @@
+Creator portrait updated from the image supplied in the conversation on 2026-10-24.
+The app embeds this image in app.py and also includes assets/engr_syed_hassan_iqbal_shah.jpg.
