@@ -354,6 +354,109 @@ def _read_uploaded_evidence(files) -> tuple[str, list[dict]]:
     return "\n".join(chunks)[:60000], profiles
 
 
+
+def markdown_report_pdf(title: str, markdown_text: str) -> bytes:
+    """Render a readable PDF from an agent Markdown report using ReportLab."""
+    from io import BytesIO
+    import re
+    from xml.sax.saxutils import escape
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
+
+    stream = BytesIO()
+    doc = SimpleDocTemplate(stream, pagesize=A4, rightMargin=18*mm, leftMargin=18*mm, topMargin=17*mm, bottomMargin=17*mm)
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='ReportTitle', parent=styles['Title'], fontSize=18, leading=22, alignment=TA_CENTER, textColor=colors.HexColor('#075B63'), spaceAfter=12))
+    styles.add(ParagraphStyle(name='H2x', parent=styles['Heading2'], textColor=colors.HexColor('#087E8B'), spaceBefore=10, spaceAfter=5))
+    styles.add(ParagraphStyle(name='H3x', parent=styles['Heading3'], textColor=colors.HexColor('#176B70'), spaceBefore=7, spaceAfter=4))
+    story=[Paragraph(escape(title), styles['ReportTitle']), Paragraph('IndusSphere Pakistan | CrewAI decision-support report', styles['Italic']), Spacer(1, 8)]
+    for raw in markdown_text.splitlines():
+        line=raw.strip()
+        if not line:
+            story.append(Spacer(1, 4)); continue
+        if line.startswith('|') and line.endswith('|'):
+            cells=[escape(x.strip()) for x in line.strip('|').split('|')]
+            if all(re.fullmatch(r'[-: ]+', x or '-') for x in cells):
+                continue
+            story.append(Paragraph('  |  '.join(cells), styles['BodyText'])); continue
+        if line.startswith('# '): story.append(Paragraph(escape(line[2:]), styles['Heading1']))
+        elif line.startswith('## '): story.append(Paragraph(escape(line[3:]), styles['H2x']))
+        elif line.startswith('### '): story.append(Paragraph(escape(line[4:]), styles['H3x']))
+        elif line.startswith(('- ', '* ')):
+            story.append(Paragraph('&bull; '+escape(line[2:]), styles['BodyText']))
+        elif re.match(r'^\d+[.)]\s', line):
+            story.append(Paragraph(escape(line), styles['BodyText']))
+        else:
+            # Preserve readable text; convert basic bold markers without interpreting raw HTML.
+            safe=escape(line).replace('**','')
+            story.append(Paragraph(safe, styles['BodyText']))
+    doc.build(story)
+    return stream.getvalue()
+
+
+# Approximate reference coordinates for place-name context only; these are not risk scores.
+_REPORT_PLACE_COORDS = {
+    'Pakistan': (30.3753, 69.3451), 'Gilgit-Baltistan': (35.9208, 74.3080), 'Gilgit': (35.9208, 74.3080),
+    'Skardu': (35.2971, 75.6333), 'Khyber Pakhtunkhwa': (34.0151, 71.5249), 'Peshawar': (34.0151, 71.5249),
+    'Punjab': (31.1704, 72.7097), 'Lahore': (31.5204, 74.3587), 'Multan': (30.1575, 71.5249),
+    'Sindh': (25.8943, 68.5247), 'Karachi': (24.8607, 67.0011), 'Sukkur': (27.7052, 68.8574),
+    'Balochistan': (28.4907, 65.0958), 'Quetta': (30.1798, 66.9750), 'Islamabad': (33.6844, 73.0479),
+    'Azad Jammu and Kashmir': (33.9259, 73.7810), 'Muzaffarabad': (34.3700, 73.4711),
+    'Indus Delta': (24.1000, 67.5000), 'Indus Plain': (29.5000, 71.0000), 'Head Marala': (32.6700, 74.4600),
+    'Tarbela': (34.0833, 72.6833), 'Mangla': (33.1400, 73.6400), 'Diamer-Bhasha': (35.5300, 73.7000),
+    'Chenab': (31.5000, 72.5000), 'Jhelum': (32.9300, 73.7300), 'Ravi': (31.5000, 74.3000), 'Sutlej': (30.9000, 73.9000),
+}
+
+def render_report_visuals(report_name: str, report_text: str, key_suffix: str = '') -> None:
+    """Show only evidence-derived charts and a place-reference map for a report."""
+    import re
+    import pandas as pd
+    import plotly.express as px
+    st.markdown('#### 🗺️ Geographic references in this report')
+    found=[]
+    for place,(lat,lon) in _REPORT_PLACE_COORDS.items():
+        if re.search(r'(?<![A-Za-z])'+re.escape(place)+r'(?![A-Za-z])', report_text, flags=re.I):
+            found.append({'Place':place,'Latitude':lat,'Longitude':lon})
+    if found:
+        # Keep one marker per named place and let users pan, zoom and inspect the labels.
+        df_places=pd.DataFrame(found).drop_duplicates(subset=['Place'])
+        fig_map=px.scatter_mapbox(df_places, lat='Latitude', lon='Longitude', hover_name='Place', zoom=4, height=430, title='Places explicitly mentioned in the agent report')
+        fig_map.update_layout(mapbox_style='open-street-map', margin={'l':0,'r':0,'t':45,'b':0})
+        st.plotly_chart(fig_map, use_container_width=True, key=f'report_map_{key_suffix}')
+        st.caption('Reference-location map only. Marker positions are approximate place references, not hazard boundaries, exposure estimates, or agent-generated risk scores.')
+    else:
+        st.info('No recognised Pakistan place names were found in this report. Add named districts, cities, river reaches or project locations to the task/context to enable the place-reference map.')
+
+    st.markdown('#### 📊 Quantitative indicators stated in this report')
+    # Extract explicit numeric statements with units. No values are fabricated or filled in.
+    pattern=re.compile(r'(?P<label>(?:[A-Z][A-Za-z0-9 /()&-]{2,45}))\s*[:=–-]\s*(?P<value>-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?P<unit>%|MW|MWh|GW|km²|km2|km|ha|hectares|MCM|BCM|m³/s|cms|mm|°C|tonnes|tons|persons|years)?', re.I)
+    metrics=[]
+    for m in pattern.finditer(report_text):
+        label=' '.join(m.group('label').split()).strip(' -*#|')
+        try: value=float(m.group('value').replace(',',''))
+        except ValueError: continue
+        if len(label)>=3 and not label.lower().startswith(('page','section','table')):
+            metrics.append({'Indicator':label[:48], 'Value':value, 'Unit':m.group('unit') or 'reported value'})
+    # Avoid duplicate repeated mentions; retain up to 18 explicit report values.
+    unique=[]; seen=set()
+    for item in metrics:
+        sig=(item['Indicator'].lower(),item['Value'],item['Unit'].lower())
+        if sig not in seen: seen.add(sig); unique.append(item)
+    if unique:
+        chart_df=pd.DataFrame(unique[:18])
+        fig=px.bar(chart_df, x='Indicator', y='Value', color='Unit', hover_data=['Unit'], title='Numeric values extracted from the report text')
+        fig.update_layout(xaxis_tickangle=-35, height=430, margin={'b':130})
+        st.plotly_chart(fig, use_container_width=True, key=f'report_chart_{key_suffix}')
+        st.caption('This chart visualises numeric values explicitly present in the report text. Different units may not be directly comparable; check the unit and source for each bar.')
+        st.dataframe(chart_df, use_container_width=True, hide_index=True)
+    else:
+        st.info('This report contains no clearly labelled numeric indicators in the supported label–value format. The app will not invent values. Include a sourced table or labelled measurements in the evidence/context to generate a quantitative chart.')
+
+
 def render_agentic_ai_page():
     st.title("🤖 Agentic AI Command Centre — CrewAI")
     st.caption("Interactive, evidence-aware reporting across IndusSphere Pakistan sectors.")
@@ -481,7 +584,17 @@ def render_agentic_ai_page():
                 content = f"# IndusSphere Pakistan — {name.replace('_', ' ')}\n\n{report_text}"
                 with st.expander(name.replace("_", " "), expanded=(len(reports) == 1)):
                     st.markdown(report_text)
-                    st.download_button("⬇️ Download Markdown", data=content.encode("utf-8"), file_name=f"{name}.md", mime="text/markdown", key=f"download_{name}_v2")
+                    left, right = st.columns(2)
+                    with left:
+                        st.download_button("⬇️ Download Markdown", data=content.encode("utf-8"), file_name=f"{name}.md", mime="text/markdown", key=f"download_{name}_v2")
+                    try:
+                        pdf_bytes = markdown_report_pdf(name.replace("_", " "), content)
+                        with right:
+                            st.download_button("📄 Download PDF", data=pdf_bytes, file_name=f"{name}.pdf", mime="application/pdf", key=f"download_pdf_{name}_v2")
+                        zf.writestr(f"{name}.pdf", pdf_bytes)
+                    except Exception as pdf_exc:
+                        st.warning(f"PDF export unavailable: {type(pdf_exc).__name__}: {pdf_exc}. Markdown download remains available.")
+                    render_report_visuals(name, report_text, key_suffix='command_'+name)
                 zf.writestr(f"{name}.md", content)
         st.download_button("📦 Download all reports (ZIP)", data=archive.getvalue(), file_name="indussphere_agentic_reports.zip", mime="application/zip", use_container_width=True, key="download_all_agentic_v2")
         if st.button("Clear generated reports", key="clear_agentic_reports_v2"):
